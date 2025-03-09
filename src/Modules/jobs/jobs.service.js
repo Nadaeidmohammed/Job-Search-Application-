@@ -4,6 +4,9 @@ import { JobModel } from "../../DB/Models/job.model.js";
 import {CompanyModel} from "../../DB/Models/company.model.js"
 import {paginate} from "../../utils/pagination/paginate.js"
 import {setupSocket} from "../../utils/Socket/soket.js"
+import cloudinary from "../../utils/file Uploading/cloudinaryConfig.js"
+import { applyToJobSchema } from "./jobs.validation.js";
+
 
 export const addJob = async (req, res, next) => {
     const{companyId}=req.params;
@@ -147,10 +150,6 @@ export const applyToJob = async (req, res, next) => {
     const { jobId } = req.params;
     const userId = req.user._id;
 
-    if (!req.file) {
-        return next(new Error("CV file is required", { cause: 400 }));
-    }
-
     const uploadedCV = await cloudinary.uploader.upload(req.file.path, {
         folder: `Users/${userId}/CVs`
     });
@@ -159,7 +158,7 @@ export const applyToJob = async (req, res, next) => {
     const userCV = { secure_url, public_id };
 
     const { error } = applyToJobSchema.validate({ jobId, userCV });
-    if (error) return next(new Error(error.details.map((err) => err.message).join(", "), { cause: 400 }));
+    if (error) return next(new Error(error.details.map(err => err.message).join(", "), { cause: 400 }));
 
     if (req.user.role !== "User") {
         return next(new Error("Unauthorized: Only users can apply to jobs", { cause: 403 }));
@@ -179,11 +178,12 @@ export const applyToJob = async (req, res, next) => {
 
     const application = await dbService.create({
         model: ApplicationModel,
-        data: { jobId, userId, userCV },
+        data: { jobId, userId, userCV, status: APPLICATION_STATUSES.PENDING },
     });
 
-    const company = await dbService.findById({ model: JobModel, id: job.companyId });
-    io.to(company.companyId.toString()).emit("newApplication", {
+    const company = await dbService.findById({ model: CompanyModel, id: job.companyId });
+
+    setupSocket.to(company._id.toString()).emit("newApplication", {
         message: `New application for job: ${job.jobTitle}`,
         applicationId: application._id,
         jobId,
@@ -197,50 +197,72 @@ export const applyToJob = async (req, res, next) => {
 };
 export const acceptOrRejectApplicant = async (req, res, next) => {
     const { applicationId } = req.params;
-    const { status } = req.body; 
+    const { status } = req.body;
     const userId = req.user._id;
-  
-        if (!["accepted", "rejected"].includes(status)) {
-            return next(new Error("Invalid status. Use 'accepted' or 'rejected'", { cause: 400 }));
-        }
 
-        const application = await dbService.findById({
-            model: ApplicationModel,
-            id: applicationId,
-            options: { populate: "user" }, 
-        });
-        if (!application) return next(new Error("Application not found", { cause: 404 }));
+    if (!Object.values(APPLICATION_STATUSES).includes(status)) {
+        return next(new Error("Invalid status. Use 'accepted' or 'rejected'", { cause: 400 }));
+    }
 
-        const job = await dbService.findById({ model: JobModel, id: application.jobId });
-        const company = await dbService.findById({ model: CompanyModel, id: job.companyId });
+    const application = await dbService.findById({
+        model: ApplicationModel,
+        id: applicationId,
+        options: { populate: "userId" }, 
+    });
 
-        if (!company.HRs.includes(userId)) {
-            return next(new Error("Unauthorized: Only HR can manage applications", { cause: 403 }));
-        }
+    if (!application) return next(new Error("Application not found", { cause: 404 }));
 
-        const updatedApplication = await dbService.findOneAndUpdate({
-            model: ApplicationModel,
-            filter: { _id: applicationId },
-            data: { status },
-            options: { new: true, runValidators: true },
-        });
+    const job = await dbService.findById({ model: JobModel, id: application.jobId });
+    if (!job) return next(new Error("Job not found", { cause: 404 }));
 
-        // Send email
-        const userEmail = application.user.email; 
+    const company = await dbService.findById({ model: CompanyModel, id: job.companyId });
+    if (!company) return next(new Error("Company not found", { cause: 404 }));
+
+    const isHR = company.HRs?.some(hrId => hrId.toString() === userId.toString());
+    const isOwner = company.createdBy.toString() === userId.toString();
+
+    if (!isHR && !isOwner) {
+        return next(new Error("Unauthorized: Only HR or company owner can manage applications", { cause: 403 }));
+    }
+
+    const updatedApplication = await dbService.findOneAndUpdate({
+        model: ApplicationModel,
+        filter: { _id: applicationId },
+        data: { status },
+        options: { new: true, runValidators: true },
+    });
+
+    if (application.userId?.email) {
+        const userEmail = application.userId.email;
         const subject = `Application Status Update for ${job.jobTitle}`;
-        const text = status === "accepted"
-            ? `Congratulations! Your application for ${job.jobTitle} at ${company.companyName} has been accepted.`
-            : `We regret to inform you that your application for ${job.jobTitle} at ${company.companyName} has been rejected.`;
+        const text = status === APPLICATION_STATUSES.ACCEPTED
+            ? `🎉 Congratulations! Your application for ${job.jobTitle} at ${company.companyName} has been accepted.`
+            : `❌ We regret to inform you that your application for ${job.jobTitle} at ${company.companyName} has been rejected.`;
 
-        await sendEmail(userEmail, subject, text);
+        try {
+            await sendEmail(userEmail, subject, text);
+            console.log(`📧 Email sent successfully to ${userEmail}`);
+        } catch (error) {
+            console.error(`❌ Error sending email to ${userEmail}:`, error);
+        }
+    } else {
+        console.warn("⚠️ No email found for the applicant.");
+    }
 
-        return res.status(200).json({
-            success: true,
-            message: `Application ${status} successfully`,
-            data: updatedApplication,
-        });
-    
+    io.to(company._id.toString()).emit("applicationStatusUpdated", {
+        message: `Application for job: ${job.jobTitle} has been ${status}`,
+        applicationId: application._id,
+        status
+    });
+
+    return res.status(200).json({
+        success: true,
+        message: `Application ${status} successfully`,
+        data: updatedApplication,
+    });
 };
+
+
 
 
 

@@ -8,7 +8,8 @@ import notFoundHandler from "./utils/errorHandling/notFoundHandler.js";
 import cors from "cors";
 import { createHandler } from "graphql-http/lib/use/express";
 import { schema } from "./Modules/app.graph.js";
-
+import {rateLimit} from "express-rate-limit"
+import helmet from "helmet";
 export const bootstrab=async(app,express)=>{
 
     app.use(express.json());
@@ -24,6 +25,15 @@ export const bootstrab=async(app,express)=>{
     //     res.header("Access-Control-Allow-Network",true)
     //     return next();
     // })
+    const limiter=rateLimit({windowMs:5*60*1000,
+        limit:2,
+        handler:(req,res,next,options)=>{
+            return next(new Error(options.message,{cause:options.statusCode}))
+        }
+    });
+    app.use(limiter);
+    app.use(helmet());
+    app.use(cors())
     app.use("/auth",authRouter);
     app.use("/user",userRouter);
     app.use("/companies",companyRouter)

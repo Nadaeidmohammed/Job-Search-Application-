@@ -49,10 +49,7 @@ export const getJobApplicationsSchema = joi.object({
 
 export const applyToJobSchema = joi.object({
     jobId: generalField.id.required(),
-    userCV: joi.object({
-        secure_url: joi.string().required(),
-        public_id: joi.string().required()
-    }).required()
+    file:joi.object(generalField.fileObject).required()
 }).required();
 
 export const acceptOrRejectApplicantSchema = joi.object({
